@@ -1,17 +1,14 @@
 // FHE Encryption utilities for health data
-import { createPublicKey, createPrivateKey, publicEncrypt, privateDecrypt } from 'crypto';
+// Browser-compatible encryption implementation
 
 // Mock FHE implementation - in production, this would use Zama FHE library
 export class FHEEncryption {
   private static instance: FHEEncryption;
-  private publicKey: string;
-  private privateKey: string;
+  private encryptionKey: string;
 
   private constructor() {
-    // Generate key pair for FHE encryption
-    const { publicKey, privateKey } = this.generateKeyPair();
-    this.publicKey = publicKey;
-    this.privateKey = privateKey;
+    // Generate encryption key for FHE encryption
+    this.encryptionKey = this.generateEncryptionKey();
   }
 
   public static getInstance(): FHEEncryption {
@@ -21,87 +18,117 @@ export class FHEEncryption {
     return FHEEncryption.instance;
   }
 
-  private generateKeyPair(): { publicKey: string; privateKey: string } {
-    // In production, this would use proper FHE key generation
-    // For now, we'll use RSA as a placeholder
-    const { publicKey, privateKey } = require('crypto').generateKeyPairSync('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: {
-        type: 'spki',
-        format: 'pem'
-      },
-      privateKeyEncoding: {
-        type: 'pkcs8',
-        format: 'pem'
-      }
-    });
-    
-    return { publicKey, privateKey };
+  private generateEncryptionKey(): string {
+    // Generate a random encryption key
+    const array = new Uint8Array(32);
+    crypto.getRandomValues(array);
+    return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
   }
 
-  // Encrypt health data using FHE
-  public encryptHealthData(data: any): string {
+  // Encrypt health data using browser-compatible encryption
+  public async encryptHealthData(data: any): Promise<string> {
     try {
       const jsonData = JSON.stringify(data);
-      const buffer = Buffer.from(jsonData, 'utf8');
+      const encoder = new TextEncoder();
+      const dataBuffer = encoder.encode(jsonData);
       
-      // In production, this would use FHE encryption
-      // For now, we'll use RSA encryption as a placeholder
-      const encrypted = publicEncrypt(this.publicKey, buffer);
-      return encrypted.toString('base64');
+      // Use Web Crypto API for encryption
+      const key = await this.importKey();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      
+      const encryptedBuffer = await crypto.subtle.encrypt(
+        {
+          name: 'AES-GCM',
+          iv: iv
+        },
+        key,
+        dataBuffer
+      );
+      
+      // Combine IV and encrypted data
+      const combined = new Uint8Array(iv.length + encryptedBuffer.byteLength);
+      combined.set(iv);
+      combined.set(new Uint8Array(encryptedBuffer), iv.length);
+      
+      return btoa(String.fromCharCode(...combined));
     } catch (error) {
       console.error('Encryption error:', error);
       throw new Error('Failed to encrypt health data');
     }
   }
 
-  // Decrypt health data using FHE
-  public decryptHealthData(encryptedData: string): any {
+  // Decrypt health data using browser-compatible decryption
+  public async decryptHealthData(encryptedData: string): Promise<any> {
     try {
-      const buffer = Buffer.from(encryptedData, 'base64');
+      const combined = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
+      const iv = combined.slice(0, 12);
+      const encrypted = combined.slice(12);
       
-      // In production, this would use FHE decryption
-      // For now, we'll use RSA decryption as a placeholder
-      const decrypted = privateDecrypt(this.privateKey, buffer);
-      return JSON.parse(decrypted.toString('utf8'));
+      const key = await this.importKey();
+      const decryptedBuffer = await crypto.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: iv
+        },
+        key,
+        encrypted
+      );
+      
+      const decoder = new TextDecoder();
+      const decryptedData = decoder.decode(decryptedBuffer);
+      return JSON.parse(decryptedData);
     } catch (error) {
       console.error('Decryption error:', error);
       throw new Error('Failed to decrypt health data');
     }
   }
 
+  private async importKey(): Promise<CryptoKey> {
+    const keyBuffer = new Uint8Array(this.encryptionKey.match(/.{2}/g)!.map(byte => parseInt(byte, 16)));
+    return await crypto.subtle.importKey(
+      'raw',
+      keyBuffer,
+      { name: 'AES-GCM' },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
   // Convert data to FHE-compatible format
-  public prepareDataForFHE(data: any): {
+  public async prepareDataForFHE(data: any): Promise<{
     encryptedData: string;
     metadata: {
       timestamp: number;
       dataHash: string;
       encryptionType: string;
     };
-  } {
-    const encryptedData = this.encryptHealthData(data);
-    const dataHash = this.generateHash(JSON.stringify(data));
+  }> {
+    const encryptedData = await this.encryptHealthData(data);
+    const dataHash = await this.generateHash(JSON.stringify(data));
     
     return {
       encryptedData,
       metadata: {
         timestamp: Date.now(),
         dataHash,
-        encryptionType: 'FHE-RSA-2048'
+        encryptionType: 'FHE-AES-GCM-256'
       }
     };
   }
 
-  private generateHash(data: string): string {
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(data).digest('hex');
+  private async generateHash(data: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const dataBuffer = encoder.encode(data);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
   // Validate encrypted data integrity
-  public validateDataIntegrity(encryptedData: string, expectedHash: string): boolean {
+  public async validateDataIntegrity(encryptedData: string, expectedHash: string): Promise<boolean> {
     try {
-      const decryptedData = this.decryptHealthData(encryptedData);
-      const actualHash = this.generateHash(JSON.stringify(decryptedData));
+      const decryptedData = await this.decryptHealthData(encryptedData);
+      const actualHash = await this.generateHash(JSON.stringify(decryptedData));
       return actualHash === expectedHash;
     } catch (error) {
       return false;

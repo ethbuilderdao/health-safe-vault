@@ -95,7 +95,7 @@ const HealthProfileForm = () => {
       // Step 2: Encrypt health data using FHE
       setCurrentStep('encrypt');
       const fheEncryption = FHEEncryption.getInstance();
-      const encryptedRecord = fheEncryption.prepareDataForFHE(healthData);
+      const encryptedRecord = await fheEncryption.prepareDataForFHE(healthData);
       setEncryptedData(encryptedRecord.encryptedData);
 
       // Step 3: Create health record on blockchain
