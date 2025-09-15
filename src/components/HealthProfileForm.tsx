@@ -10,7 +10,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Checkbox } from "@/components/ui/checkbox";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { useToast } from "@/hooks/use-toast";
-import { UserPlus, Shield, Sparkles, Loader2, CheckCircle } from "lucide-react";
+import { UserPlus, Shield, Sparkles, Loader2, CheckCircle, Lock, Unlock } from "lucide-react";
+import { useAccount } from 'wagmi';
+import { FHEEncryption, HealthData, HealthDataProcessor } from '@/lib/fhe-utils';
+import { useContractInteraction, CreateHealthRecordParams, MintNFTParams } from '@/lib/contract-utils';
 
 const healthProfileSchema = z.object({
   patientName: z.string().min(2, "Patient name must be at least 2 characters"),
@@ -27,7 +30,14 @@ type HealthProfileFormData = z.infer<typeof healthProfileSchema>;
 const HealthProfileForm = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [currentStep, setCurrentStep] = useState<'encrypt' | 'record' | 'mint' | 'complete'>('encrypt');
+  const [recordId, setRecordId] = useState<number | null>(null);
+  const [nftId, setNftId] = useState<number | null>(null);
+  const [encryptedData, setEncryptedData] = useState<string>('');
+  
   const { toast } = useToast();
+  const { address, isConnected } = useAccount();
+  const { createHealthRecord, mintMedicalNFT, isPending, isConfirming, isConfirmed, error } = useContractInteraction();
 
   const form = useForm<HealthProfileFormData>({
     resolver: zodResolver(healthProfileSchema),
@@ -43,28 +53,115 @@ const HealthProfileForm = () => {
   });
 
   const onSubmit = async (data: HealthProfileFormData) => {
+    if (!isConnected || !address) {
+      toast({
+        title: "Wallet Not Connected",
+        description: "Please connect your wallet to mint health profile NFT.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsSubmitting(true);
+    setCurrentStep('encrypt');
+
     try {
-      // Simulate minting process
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      
+      // Step 1: Validate and prepare health data
+      const healthData: HealthData = {
+        patientName: data.patientName,
+        recordType: data.recordType,
+        dateOfBirth: data.dateOfBirth,
+        bloodType: data.bloodType,
+        medicalHistory: data.medicalHistory,
+        emergencyContact: data.emergencyContact,
+        age: HealthDataProcessor.calculateAge(data.dateOfBirth),
+        weight: 70, // Default values - in real app, these would be input fields
+        height: 170,
+        bloodPressure: 120,
+        heartRate: 72,
+        temperature: 36.5,
+        healthScore: HealthDataProcessor.generateHealthScore({
+          ...healthData,
+          age: HealthDataProcessor.calculateAge(data.dateOfBirth)
+        })
+      };
+
+      // Validate health data
+      const validation = HealthDataProcessor.validateHealthData(healthData);
+      if (!validation.isValid) {
+        throw new Error(validation.errors.join(', '));
+      }
+
+      // Step 2: Encrypt health data using FHE
+      setCurrentStep('encrypt');
+      const fheEncryption = FHEEncryption.getInstance();
+      const encryptedRecord = fheEncryption.prepareDataForFHE(healthData);
+      setEncryptedData(encryptedRecord.encryptedData);
+
+      // Step 3: Create health record on blockchain
+      setCurrentStep('record');
+      const recordParams: CreateHealthRecordParams = {
+        age: healthData.age!,
+        weight: healthData.weight!,
+        height: healthData.height!,
+        bloodPressure: healthData.bloodPressure!,
+        heartRate: healthData.heartRate!,
+        temperature: healthData.temperature!,
+        healthScore: healthData.healthScore!,
+        diagnosis: data.recordType,
+        treatment: data.medicalHistory,
+        medication: data.emergencyContact,
+        patient: address
+      };
+
+      const recordResult = await createHealthRecord(recordParams);
+      if (!recordResult.success) {
+        throw new Error(recordResult.error || 'Failed to create health record');
+      }
+
+      setRecordId(recordResult.recordId!);
+
+      // Step 4: Mint medical NFT
+      setCurrentStep('mint');
+      const mintParams: MintNFTParams = {
+        recordId: recordResult.recordId!,
+        mintPrice: "0.01", // 0.01 ETH mint price
+        metadataHash: encryptedRecord.metadata.dataHash,
+        encryptedData: encryptedRecord.encryptedData
+      };
+
+      const mintResult = await mintMedicalNFT(mintParams);
+      if (!mintResult.success) {
+        throw new Error(mintResult.error || 'Failed to mint NFT');
+      }
+
+      setNftId(mintResult.nftId!);
+      setCurrentStep('complete');
       setIsSuccess(true);
+
       toast({
         title: "NFT Minted Successfully!",
-        description: "Your health profile NFT has been created and added to your wallet.",
+        description: `Your encrypted health profile NFT (ID: ${mintResult.nftId}) has been created and added to your wallet.`,
       });
-      
+
       // Reset form after success
       setTimeout(() => {
         setIsSuccess(false);
+        setCurrentStep('encrypt');
+        setRecordId(null);
+        setNftId(null);
+        setEncryptedData('');
         form.reset();
-      }, 2000);
+      }, 5000);
+
     } catch (error) {
+      console.error('Minting error:', error);
       toast({
         title: "Minting Failed",
-        description: "There was an error creating your health profile NFT. Please try again.",
+        description: error instanceof Error ? error.message : "There was an error creating your health profile NFT. Please try again.",
         variant: "destructive",
       });
+      setCurrentStep('encrypt');
     } finally {
       setIsSubmitting(false);
     }
@@ -240,22 +337,86 @@ const HealthProfileForm = () => {
             </div>
             
             <div className="pt-4">
+              {/* Progress Steps */}
+              {isSubmitting && (
+                <div className="mb-4 p-4 bg-medical-accent rounded-lg border border-clinical-blue/20">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-clinical-blue">Minting Progress</span>
+                    <span className="text-xs text-muted-foreground">
+                      {currentStep === 'encrypt' && 'Step 1/4'}
+                      {currentStep === 'record' && 'Step 2/4'}
+                      {currentStep === 'mint' && 'Step 3/4'}
+                      {currentStep === 'complete' && 'Step 4/4'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    {currentStep === 'encrypt' && (
+                      <>
+                        <Lock className="h-4 w-4 text-clinical-green" />
+                        <span>Encrypting health data with FHE...</span>
+                      </>
+                    )}
+                    {currentStep === 'record' && (
+                      <>
+                        <Shield className="h-4 w-4 text-clinical-green" />
+                        <span>Creating encrypted health record on blockchain...</span>
+                      </>
+                    )}
+                    {currentStep === 'mint' && (
+                      <>
+                        <Sparkles className="h-4 w-4 text-clinical-green" />
+                        <span>Minting medical NFT...</span>
+                      </>
+                    )}
+                    {currentStep === 'complete' && (
+                      <>
+                        <CheckCircle className="h-4 w-4 text-clinical-green" />
+                        <span>NFT minted successfully!</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Success State */}
+              {isSuccess && (
+                <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-center gap-2 text-green-800 mb-2">
+                    <CheckCircle className="h-5 w-5" />
+                    <span className="font-medium">NFT Minted Successfully!</span>
+                  </div>
+                  <div className="text-sm text-green-700 space-y-1">
+                    {recordId && <p>Health Record ID: {recordId}</p>}
+                    {nftId && <p>Medical NFT ID: {nftId}</p>}
+                    <p>Your encrypted health data is now stored on the blockchain.</p>
+                  </div>
+                </div>
+              )}
+
               <Button 
                 type="submit" 
                 variant="mint" 
                 className="w-full" 
                 size="lg"
-                disabled={isSubmitting}
+                disabled={isSubmitting || !isConnected}
               >
                 {isSubmitting ? (
                   <>
                     <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                    Minting NFT...
+                    {currentStep === 'encrypt' && 'Encrypting Data...'}
+                    {currentStep === 'record' && 'Creating Record...'}
+                    {currentStep === 'mint' && 'Minting NFT...'}
+                    {currentStep === 'complete' && 'Completing...'}
                   </>
                 ) : isSuccess ? (
                   <>
                     <CheckCircle className="h-5 w-5 mr-2" />
                     NFT Created Successfully!
+                  </>
+                ) : !isConnected ? (
+                  <>
+                    <Unlock className="h-5 w-5 mr-2" />
+                    Connect Wallet to Mint
                   </>
                 ) : (
                   <>
@@ -264,9 +425,16 @@ const HealthProfileForm = () => {
                   </>
                 )}
               </Button>
-              <p className="text-xs text-center text-muted-foreground mt-2">
-                Network fee: ~0.01 ETH | Gas: Estimated
-              </p>
+              
+              <div className="text-xs text-center text-muted-foreground mt-2 space-y-1">
+                <p>Network fee: ~0.01 ETH | Gas: Estimated</p>
+                {isConnected && (
+                  <p className="text-clinical-green">✓ Wallet connected to Sepolia</p>
+                )}
+                {!isConnected && (
+                  <p className="text-orange-600">⚠ Please connect your wallet first</p>
+                )}
+              </div>
             </div>
           </form>
         </Form>
